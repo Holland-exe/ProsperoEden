@@ -80,6 +80,7 @@ extern "C" std::int32_t sceKernelAvailableFlexibleMemorySize(std::size_t*);
 #include "core/frontend/graphics_context.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applets.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/hle/service/set/settings_types.h"
@@ -1511,6 +1512,12 @@ int main(int argc, char** argv) {
             system.Initialize();
             if (system.IsPoweredOn()) return 1;
             passed("core_initialized");
+            // A program the game asked to start in its place (nn::oe ExecuteProgram): games
+            // made of several programs, such as the Metal Gear Solid Master Collection, boot a
+            // launcher program that hands over to the game in another program of the same file.
+            // Like Eden's desktop frontend (MainWindow::OnExecuteProgram), the current program
+            // is stopped and the same file loaded again at the program index asked for.
+            std::optional<Service::AM::FrontendAppletParameters> next_program;
             for (unsigned cycle = 0; guest && cycle < cycles; ++cycle) {
                 if (game) LOG_INFO(Frontend, "EDEN_GAME_SESSION_BEGIN {}", cycle + 1);
                 struct Completion {
@@ -1522,6 +1529,7 @@ int main(int argc, char** argv) {
                     bool room_lost = false;
                     std::exception_ptr failure;
                     std::string guest_fault;
+                    std::optional<std::size_t> execute_program;
                 };
                 auto completion = std::make_shared<Completion>();
                 system.RegisterExitCallback([completion] {
@@ -1529,9 +1537,18 @@ int main(int argc, char** argv) {
                     completion->exited = true;
                     completion->wake.notify_one();
                 });
+                // Called on a guest thread: only noted here, the program is changed below once
+                // this session has been stopped.
+                system.RegisterExecuteProgramCallback([completion](std::size_t program_index) {
+                    std::lock_guard lock(completion->mutex);
+                    if (!completion->execute_program) completion->execute_program = program_index;
+                    completion->exited = true;
+                    completion->wake.notify_one();
+                });
                 SCOPE_EXIT {
                     if (system.IsPoweredOn()) system.ShutdownMainProcess();
                     system.RegisterExitCallback({});
+                    system.RegisterExecuteProgramCallback({});
                 };
                 // Like Eden's Qt/Android frontends, reset shutdown state for each load.
                 system.SetShuttingDown(false);
@@ -1564,6 +1581,12 @@ int main(int argc, char** argv) {
                 Service::AM::FrontendAppletParameters params{
                     .applet_id = Service::AM::AppletId::Application,
                 };
+                if (next_program) {
+                    params = *next_program;
+                    next_program.reset();
+                    Eden::Report("launch", ("Starting program " + std::to_string(params.program_index) +
+                                            " of this game").c_str());
+                }
 #ifdef PS5_NATIVE
                 // While a game loads nothing else reads the controller, so Touchpad + L1 did nothing
                 // until the game ran: a load that hung could only be left by closing ProsperoEden.
@@ -2051,6 +2074,14 @@ int main(int argc, char** argv) {
                     for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
 #endif
+                // A program change asked for by the game: read before the process is gone.
+                std::optional<std::size_t> program_asked;
+                u64 previous_program_id = 0;
+                {
+                    std::lock_guard lock(completion->mutex);
+                    if (!completion->return_to_menu) program_asked = completion->execute_program;
+                }
+                if (program_asked) previous_program_id = system.GetApplicationProcessProgramID();
                 system.ShutdownMainProcess();
                 Eden::Report("shutdown", "Game stopped; releasing renderer");
 #ifndef PS5_NATIVE
@@ -2113,6 +2144,22 @@ int main(int argc, char** argv) {
 #endif
 #endif
                 if (game) LOG_INFO(Frontend, "EDEN_GAME_SESSION_END {}", cycle + 1);
+                if (program_asked && !return_to_menu) {
+                    Service::AM::FrontendAppletParameters next{
+                        .applet_id = Service::AM::AppletId::Application,
+                        .launch_type = Service::AM::LaunchType::ApplicationInitiated,
+                        .program_index = static_cast<s32>(*program_asked),
+                    };
+                    if (previous_program_id > static_cast<u64>(Service::AM::AppletProgramId::MaxProgramId)) {
+                        next.program_id = previous_program_id;
+                        next.previous_program_index =
+                            static_cast<s32>(previous_program_id - FileSys::GetBaseTitleID(previous_program_id));
+                    }
+                    LOG_INFO(Frontend, "ExecuteProgram: program_index={} previous_program_id={:016X}",
+                             *program_asked, previous_program_id);
+                    next_program = next;
+                    --cycle;  // the same session goes on in the new program (unsigned wrap is defined)
+                }
             }
         }
         passed("core_destroyed");
