@@ -2158,6 +2158,9 @@ int main(int argc, char** argv) {
                     LOG_INFO(Frontend, "ExecuteProgram: program_index={} previous_program_id={:016X}",
                              *program_asked, previous_program_id);
                     next_program = next;
+                    // The launcher's stop above began the stop limit (stop_limit.h); this program
+                    // is gone and the next one starts now, as before every next game.
+                    Eden::StopLimit::End();
                     --cycle;  // the same session goes on in the new program (unsigned wrap is defined)
                 }
             }
