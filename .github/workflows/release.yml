@@ -299,3 +299,29 @@ jobs:
               "dist/ProsperoEden-$GITHUB_REF_NAME.zip" dist/SHA256SUMS
             echo "::notice title=Files added to the existing release::The release for $GITHUB_REF_NAME had no ZIP; this run's ZIP and SHA256SUMS were added. Its title and notes were not changed."
           fi
+
+  # local-build only: the release ZIP pushed to the ps5-drop branch, whose raw files any page
+  # can fetch, so the PS5 web file manager can pull and install a test build directly.
+  ps5-drop:
+    if: github.ref == 'refs/heads/local-build'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ProsperoEden
+          path: drop
+      - name: Push the ZIP to the ps5-drop branch
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd drop
+          ls -la
+          git init -q -b ps5-drop
+          git add -A
+          git -c user.name=ps5-drop -c user.email=ps5-drop@users.noreply.github.com \
+            commit -qm "Build ${GITHUB_SHA::7} (run ${GITHUB_RUN_ID})"
+          git push -f "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ps5-drop
