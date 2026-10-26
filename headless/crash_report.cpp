@@ -656,3 +656,49 @@ Last TakeLast(const std::string& logs_folder, const std::string& eden_log) {
 }
 
 } // namespace Eden::Crash
+
+#ifdef PS5_NATIVE
+// Every thread gets at least kMinimumThreadStack of stack (link-headless-native.sh wraps
+// pthread_create, so std::thread inside the static libc++ comes through here too). A thread
+// of the console starts with a small stack; Eden's own threads (HLE services such as FS, the
+// shader and pipeline builders, texture decoders) were written for desktop stacks of
+// megabytes. A thread that runs past its stack's end takes the whole app down without a
+// crash report, since the handler above then has no stack to run on either: seen with
+// METAL GEAR SOLID 4 Master Collection a few seconds into its game program.
+#include <pthread.h>
+#include <atomic>
+
+extern "C" int __real_pthread_create(pthread_t* thread, const pthread_attr_t* attributes,
+                                     void* (*start)(void*), void* argument);
+
+namespace {
+constexpr std::size_t kMinimumThreadStack = 2u << 20;
+std::atomic<unsigned> raised_threads{0};
+
+void NoteRaised(std::size_t from) noexcept {
+    if (raised_threads.fetch_add(1, std::memory_order_relaxed) == 0)
+        std::fprintf(stderr, "EDEN_THREAD_STACK minimum=%zu first_raised_from=%zu\n",
+                     kMinimumThreadStack, from);
+}
+} // namespace
+
+extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attributes,
+                                     void* (*start)(void*), void* argument) {
+    if (attributes) {
+        std::size_t size = 0;
+        if (pthread_attr_getstacksize(attributes, &size) == 0 && size < kMinimumThreadStack &&
+            pthread_attr_setstacksize(const_cast<pthread_attr_t*>(attributes), kMinimumThreadStack) == 0)
+            NoteRaised(size);
+        return __real_pthread_create(thread, attributes, start, argument);
+    }
+    pthread_attr_t own;
+    if (pthread_attr_init(&own) != 0) return __real_pthread_create(thread, nullptr, start, argument);
+    std::size_t size = 0;
+    pthread_attr_getstacksize(&own, &size);
+    const bool raised = size < kMinimumThreadStack && pthread_attr_setstacksize(&own, kMinimumThreadStack) == 0;
+    const int result = __real_pthread_create(thread, &own, start, argument);
+    pthread_attr_destroy(&own);
+    if (raised && result == 0) NoteRaised(size);
+    return result;
+}
+#endif
