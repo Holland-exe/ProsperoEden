@@ -47,7 +47,7 @@ fi
     --eh-frame-hdr --gc-sections --version-script "$root/tools/app-symbols.map" -e _start \
     --no-dynamic-linker \
     --error-limit=0 -Map="$output.map" \
-    --wrap=aligned_alloc --wrap=malloc --wrap=calloc --wrap=realloc --wrap=free --wrap=pthread_create \
+    --wrap=aligned_alloc --wrap=malloc --wrap=calloc --wrap=realloc --wrap=free \
     --wrap=posix_memalign --wrap=malloc_usable_size \
     --wrap=sceKernelAllocateDirectMemory --wrap=sceKernelReleaseDirectMemory \
     -o "$output" --start-group "${libraries[@]}" "${radv_link_inputs[@]}" \
