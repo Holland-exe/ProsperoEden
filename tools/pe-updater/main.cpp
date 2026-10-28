@@ -4,7 +4,8 @@
 //
 //  1. Reads SHA256SUMS from the ps5-drop branch: the ZIP's name and checksum.
 //  2. Stops if that build is already installed, or if ProsperoEden is running.
-//  3. Downloads the ZIP over HTTPS with the console's own HTTP/2 library and checks its SHA-256.
+//  3. Downloads the ZIP over HTTPS (libcurl, checked against the console's own certificate list;
+//     the console's HTTP/2 library as a fallback) and checks its SHA-256.
 //  4. Unpacks the app folder with ProsperoEden's validated extractor (self_update_helper).
 //  5. Moves the installed app folder (the one /user/app/PPSA99008/mount.lnk points to) to
 //     /data/pe-backup/<name>-<date>, and puts the new one in its place, so the home screen
@@ -14,6 +15,8 @@
 #include "archive.hpp"
 #include "files.hpp"
 #include "self_update_sha256.h"
+
+#include <curl/curl.h>
 
 #include <atomic>
 #include <cerrno>
@@ -71,6 +74,11 @@ void log_line(const char *format, ...) {
     }
 }
 
+bool exists_file(const char *path) {
+    struct stat info {};
+    return stat(path, &info) == 0;
+}
+
 struct NotificationRequest {
     std::uint8_t reserved[45];
     char message[3075];
@@ -110,9 +118,15 @@ struct Http {
     template <typename Sink> int get(const std::string &url, Sink sink, std::uint64_t &bytes) {
         bytes = 0;
         const int request = sceHttp2CreateRequestWithURL(templ, "GET", url.c_str(), 0);
-        if (request < 0) return request;
+        if (request < 0) {
+            log_line("http2: create request 0x%08x", static_cast<unsigned>(request));
+            return request;
+        }
         int status = -1;
-        if (sceHttp2SendRequest(request, nullptr, 0) != 0 || sceHttp2GetStatusCode(request, &status) != 0) {
+        const int sent = sceHttp2SendRequest(request, nullptr, 0);
+        const int got_status = sent == 0 ? sceHttp2GetStatusCode(request, &status) : 0;
+        if (sent != 0 || got_status != 0) {
+            log_line("http2: send 0x%08x, status 0x%08x", static_cast<unsigned>(sent), static_cast<unsigned>(got_status));
             sceHttp2DeleteRequest(request);
             return -2;
         }
@@ -130,6 +144,63 @@ struct Http {
         return status;
     }
 };
+
+// ------------------------------------------------------------------ HTTPS (libcurl)
+
+constexpr const char *kCaList = "/system/common/cert/CA_LIST.cer";
+
+template <typename Sink> std::size_t curl_sink(char *data, std::size_t size, std::size_t count, void *user) {
+    return (*static_cast<Sink *>(user))(data, size * count) ? size * count : 0;
+}
+
+// GETs url with libcurl; returns the HTTP status, or a negative value when curl failed.
+template <typename Sink> int curl_get(const std::string &url, Sink &sink, std::uint64_t &bytes) {
+    bytes = 0;
+    CURL *easy = curl_easy_init();
+    if (!easy) {
+        log_line("curl: init failed");
+        return -10;
+    }
+    curl_easy_setopt(easy, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(easy, CURLOPT_USERAGENT, "pe-updater/1.1");
+    curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT, 20L);
+    curl_easy_setopt(easy, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(easy, CURLOPT_LOW_SPEED_TIME, 60L);
+    if (exists_file(kCaList)) curl_easy_setopt(easy, CURLOPT_CAINFO, kCaList);
+    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &curl_sink<Sink>);
+    curl_easy_setopt(easy, CURLOPT_WRITEDATA, &sink);
+    const CURLcode result = curl_easy_perform(easy);
+    long status = 0;
+    curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &status);
+    curl_off_t received = 0;
+    curl_easy_getinfo(easy, CURLINFO_SIZE_DOWNLOAD_T, &received);
+    bytes = static_cast<std::uint64_t>(received);
+    curl_easy_cleanup(easy);
+    if (result != CURLE_OK) {
+        log_line("curl: %s (%d)", curl_easy_strerror(result), static_cast<int>(result));
+        return -11;
+    }
+    return static_cast<int>(status);
+}
+
+// libcurl first; if it could not connect at all, the console's HTTP/2 library.
+template <typename Sink, typename Reset>
+int fetch(Http &http, bool &http_ready, const std::string &url, Sink sink, Reset reset, std::uint64_t &bytes) {
+    int status = curl_get(url, sink, bytes);
+    if (status == 200 || status > 0) return status;
+    reset();
+    if (!http_ready) {
+        http_ready = http.open();
+        if (!http_ready) {
+            log_line("http2: the console's network library did not start");
+            return status;
+        }
+    }
+    log_line("trying the console's HTTP/2 library");
+    return http.get(url, sink, bytes);
+}
 
 // ------------------------------------------------------------------ helpers
 
@@ -218,17 +289,19 @@ int main() {
         (exists(target) && !exists(target + "/eboot.bin")))
         return fail("the install folder does not look like the ProsperoEden app; nothing was touched");
 
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    log_line("certificates: %s", exists_file(kCaList) ? kCaList : "(none found)");
     Http http;
-    if (!http.open()) return fail("the console's network library did not start");
+    bool http_ready = false;
     notify("ProsperoEden updater: checking for a new build...");
 
     // 1. SHA256SUMS: "<hash>  <zip name>"
     std::string sums;
     std::uint64_t bytes = 0;
-    int status = http.get(std::string(kBase) + "SHA256SUMS", [&](const char *data, std::size_t size) {
+    int status = fetch(http, http_ready, std::string(kBase) + "SHA256SUMS", [&](const char *data, std::size_t size) {
         sums.append(data, size);
         return sums.size() < 4096;
-    }, bytes);
+    }, [&] { sums.clear(); }, bytes);
     log_line("SHA256SUMS: status %d, %llu bytes", status, static_cast<unsigned long long>(bytes));
     if (status != 200) return fail("could not reach GitHub (is the PS5 online?)");
     const std::string first = trim(sums.substr(0, sums.find('\n')));
@@ -255,9 +328,14 @@ int main() {
     self_update_sha256 hash;
     self_update_sha256_start(&hash);
     notify("Downloading %s...", zip_name.c_str());
-    status = http.get(std::string(kBase) + zip_name, [&](const char *data, std::size_t size) {
+    status = fetch(http, http_ready, std::string(kBase) + zip_name, [&](const char *data, std::size_t size) {
         self_update_sha256_add(&hash, data, size);
         return std::fwrite(data, 1, size, out) == size;
+    }, [&] {
+        // A failed first attempt: start the file and the checksum again.
+        std::fflush(out);
+        if (ftruncate(fileno(out), 0) == 0) std::rewind(out);
+        self_update_sha256_start(&hash);
     }, bytes);
     const bool closed = std::fclose(out) == 0;
     log_line("download: status %d, %llu bytes", status, static_cast<unsigned long long>(bytes));

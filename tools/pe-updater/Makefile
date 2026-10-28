@@ -14,10 +14,15 @@ HELPER := $(ROOT)/headless/self_update_helper
 CHECK := $(ROOT)/headless/update_check
 OUTPUT ?= $(ROOT)/build/pe-updater/pe-updater.elf
 WORK := $(dir $(OUTPUT))
-CXXFLAGS := -std=c++20 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -I$(ROOT)/third_party -I$(HELPER) -I$(CHECK)
+HOMEBREW := $(PS5_SYSROOT)/user/homebrew
+CXXFLAGS := -std=c++20 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -I$(ROOT)/third_party -I$(HELPER) -I$(CHECK) \
+	-I$(HOMEBREW)/include -DCURL_STATICLIB
 CFLAGS := -std=c11 -O2 -Wall -Wextra -I$(CHECK)
 MINIZ_CFLAGS := -std=c11 -O2 -w
-LDFLAGS := -Wl,--build-id=none -lSceNet -lSceSsl -lSceHttp2
+# libcurl with OpenSSL from PacBrew (installed into the SDK by the workflow), and the
+# console's own HTTP/2 library as the fallback.
+LDFLAGS := -Wl,--build-id=none -L$(HOMEBREW)/lib -lcurl -lpsl -lssl -lcrypto -lzstd -lz -pthread \
+	-lSceNet -lSceSsl -lSceHttp2
 
 OBJECTS := $(WORK)main.o $(WORK)archive.o $(WORK)files.o $(WORK)self_update_sha256.o \
 	$(WORK)miniz.o $(WORK)miniz_tinfl.o $(WORK)miniz_tdef.o $(WORK)miniz_zip.o
