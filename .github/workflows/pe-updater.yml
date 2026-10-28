@@ -53,6 +53,18 @@ jobs:
           unzip -q "$RUNNER_TEMP/sdk.zip" -d "$RUNNER_TEMP"
           echo "PS5_PAYLOAD_SDK=$RUNNER_TEMP/ps5-payload-sdk" >> "$GITHUB_ENV"
 
+      - name: Add PacBrew's libcurl and OpenSSL to the SDK (v0.40.2, as ProsperoEden pins)
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 5 -o "$RUNNER_TEMP/pacbrew.tar.gz" \
+            https://github.com/ps5-payload-dev/pacbrew-repo/releases/download/v0.40.2/ps5-payload-dev.tar.gz
+          echo "a85f65de418a8e6a898c6c3e3c870d50fff7618a200e4dd59ea9692af6ecec4d  $RUNNER_TEMP/pacbrew.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/pacbrew"
+          tar -xzf "$RUNNER_TEMP/pacbrew.tar.gz" -C "$RUNNER_TEMP/pacbrew" opt/ps5-payload-sdk/target/user/homebrew/include opt/ps5-payload-sdk/target/user/homebrew/lib
+          mkdir -p "$PS5_PAYLOAD_SDK/target/user/homebrew"
+          cp -a "$RUNNER_TEMP/pacbrew/opt/ps5-payload-sdk/target/user/homebrew/." "$PS5_PAYLOAD_SDK/target/user/homebrew/"
+          ls "$PS5_PAYLOAD_SDK/target/user/homebrew/lib" | grep -E "libcurl|libssl|libcrypto|libpsl|libzstd|libz\\."
+
       - name: Build the payload (pe-updater.elf)
         run: |
           set -euo pipefail
