@@ -59,6 +59,17 @@ jobs:
           make -C tools/pe-updater PS5_PAYLOAD_SDK="$PS5_PAYLOAD_SDK"
           python3 tools/validate-loader-elf.py build/pe-updater/pe-updater.elf
 
+      - name: Pre-fetch zlib 1.3.2 for the boilerplate
+        # zlib.net/fossils was not serving it; zlib's own GitHub release has the identical file
+        # (the SHA-256 the boilerplate pins), which its setup script then uses as it is.
+        run: |
+          set -euo pipefail
+          mkdir -p bp/.deps/native/zlib
+          curl --fail --silent --show-error --location --retry 5 \
+            -o bp/.deps/native/zlib/zlib-1.3.2.tar.gz \
+            https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz
+          echo "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16  bp/.deps/native/zlib/zlib-1.3.2.tar.gz" | sha256sum -c -
+
       - name: Build the app (PPSA99512)
         env:
           USE_CCACHE: "0"
